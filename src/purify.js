@@ -1674,6 +1674,33 @@ function createDOMPurify(window = getGlobal()) {
 
     /* If we sanitized `dirty` in-place, return it. */
     if (IN_PLACE) {
+      /* The in-place ROOT may itself have been force-removed during the walk
+         (a rawtext root killed by the SAFE_FOR_XML raw text probe, a
+         noscript/noembed root, a disallowed root, an mXSS-canary root, ...).
+         Such a root is detached (or, without a parent, could not be detached
+         at all), its attributes were never inspected because the walk skips
+         _sanitizeAttributes for removed nodes, and for a rawtext element its
+         text still carries a literal `</tag>`-bearing payload, so
+         re-serialising and re-parsing the returned node re-opens the markup.
+         There is no safe node to hand back: cancel the attribute axis on the
+         refused root and fail closed - identical in spirit to the
+         clobbered-root throw at the IN_PLACE entry. Covers every present and
+         future root-kill reason in one check. GHSA-6688-9rhm-gjv2 */
+      let rootWasRemoved = false;
+      arrayForEach(DOMPurify.removed, (entry) => {
+        if (entry.element === dirty) {
+          rootWasRemoved = true;
+        }
+      });
+
+      if (rootWasRemoved) {
+        _neutralizeSubtree(dirty);
+        throw typeErrorCreate(
+          'a node selected for removal could not be safely returned; ' +
+            'refusing to sanitize in place'
+        );
+      }
+
       return dirty;
     }
 
