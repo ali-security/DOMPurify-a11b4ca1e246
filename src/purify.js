@@ -146,6 +146,12 @@ function createDOMPurify(window = getGlobal()) {
   } = document;
   const { importNode } = originalDocument;
 
+  /* Only trust an own documentMode, shield it from prototype pollution */
+  let documentMode = {};
+  try {
+    documentMode = clone(document).documentMode ? document.documentMode : {};
+  } catch (_) {}
+
   let hooks = {};
 
   /**
@@ -154,7 +160,7 @@ function createDOMPurify(window = getGlobal()) {
   DOMPurify.isSupported =
     implementation &&
     typeof implementation.createHTMLDocument !== 'undefined' &&
-    document.documentMode !== 9;
+    documentMode !== 9;
 
   const {
     MUSTACHE_EXPR,
@@ -340,6 +346,9 @@ function createDOMPurify(window = getGlobal()) {
     if (!cfg || typeof cfg !== 'object') {
       cfg = {};
     }
+
+    /* Shield configuration object from prototype pollution */
+    cfg = clone(cfg);
 
     /* Set configuration parameters */
     ALLOWED_TAGS =
