@@ -41,6 +41,17 @@ const arrayPop = unapply(Array.prototype.pop);
 const arrayPush = unapply(Array.prototype.push);
 const arraySlice = unapply(Array.prototype.slice);
 
+/* Set is not available in older engines (e.g. MSIE 10), fall back to a
+ * plain array there, which is slower but behaves the same */
+const hasSet = typeof Set === 'function';
+const setCreate = hasSet ? unconstruct(Set) : () => [];
+const setAdd = hasSet
+  ? unapply(Set.prototype.add)
+  : (set, value) => arrayPush(set, value);
+const setHas = hasSet
+  ? unapply(Set.prototype.has)
+  : (set, value) => arrayIndexOf(set, value) !== -1;
+
 const stringToLowerCase = unapply(String.prototype.toLowerCase);
 const stringMatch = unapply(String.prototype.match);
 const stringReplace = unapply(String.prototype.replace);
@@ -160,6 +171,10 @@ export {
   // RegExp
   regExpCreate,
   regExpTest,
+  // Set
+  setAdd,
+  setCreate,
+  setHas,
   // String
   stringIndexOf,
   stringMatch,
