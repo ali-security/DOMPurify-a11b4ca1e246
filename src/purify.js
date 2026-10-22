@@ -149,6 +149,8 @@ function createDOMPurify(window = getGlobal()) {
   const getAttributes = lookupGetter(ElementPrototype, 'attributes');
   const getNodeType =
     Node && Node.prototype ? lookupGetter(Node.prototype, 'nodeType') : null;
+  const getNodeName =
+    Node && Node.prototype ? lookupGetter(Node.prototype, 'nodeName') : null;
   /* Only cache the shadowRoot getter where the engine implements Shadow DOM,
      lookupGetter's fallback would otherwise warn for every element */
   const getShadowRoot =
@@ -683,6 +685,33 @@ function createDOMPurify(window = getGlobal()) {
   };
 
   /**
+   * _getNodeName
+   *
+   * GHSA-x4vx-rjvf-j5p4: read nodeName through the cached Node.prototype
+   * getter instead of trusting the instance-visible property. A live node
+   * handed in with IN_PLACE can carry an own `nodeName` (e.g. a <script>
+   * defining nodeName as "DIV"), which a direct read returns while the
+   * getter reads the node's internal slot. The getter works for nodes of
+   * any realm. Falls back to the direct read only where the getter is not
+   * available.
+   *
+   * @param  {Node} node node to read the name of
+   * @return {String} the node name
+   */
+  const _getNodeName = function (node) {
+    if (getNodeName) {
+      try {
+        const nodeName = getNodeName(node);
+        if (typeof nodeName === 'string') {
+          return nodeName;
+        }
+      } catch (_) {}
+    }
+
+    return node.nodeName;
+  };
+
+  /**
    * _isDocumentFragment
    *
    * Realm safety (GHSA-hpcv-96wg-7vj8): `value instanceof DocumentFragment`
@@ -712,6 +741,7 @@ function createDOMPurify(window = getGlobal()) {
    * @param  {Node} elm element to check for clobbering attacks
    * @return {Boolean} true if clobbered, false if safe
    */
+  // eslint-disable-next-line complexity
   const _isClobbered = function (elm) {
     const nodeType = _getNodeType(elm);
     if (nodeType === 3 || nodeType === 4 || nodeType === 8) {
@@ -723,6 +753,11 @@ function createDOMPurify(window = getGlobal()) {
       (typeof elm.__removalCount !== 'undefined' &&
         typeof elm.__removalCount !== 'number') ||
       typeof elm.nodeName !== 'string' ||
+      /* NodeName spoofing probe (GHSA-x4vx-rjvf-j5p4). A live node can
+         define an own nodeName (e.g. a <script> claiming to be a "DIV"),
+         which diverges from the cached Node.prototype getter. Such a node
+         is hostile, treat it like any other clobbered node. */
+      elm.nodeName !== _getNodeName(elm) ||
       typeof elm.textContent !== 'string' ||
       typeof elm.removeChild !== 'function' ||
       elm.attributes !== getAttributes(elm) ||
@@ -854,8 +889,10 @@ function createDOMPurify(window = getGlobal()) {
       return true;
     }
 
-    /* Now let's check the element's type and name */
-    const tagName = stringToLowerCase(currentNode.nodeName);
+    /* Now let's check the element's type and name. The name is read through
+       the cached getter, an own nodeName property can not spoof it
+       (GHSA-x4vx-rjvf-j5p4) */
+    const tagName = stringToLowerCase(_getNodeName(currentNode));
 
     /* Execute a hook if present */
     _executeHook('uponSanitizeElement', currentNode, {
@@ -1204,8 +1241,10 @@ function createDOMPurify(window = getGlobal()) {
         value = stringReplace(value, ERB_EXPR, ' ');
       }
 
-      /* Is `value` valid for this attribute? */
-      const lcTag = currentNode.nodeName.toLowerCase();
+      /* Is `value` valid for this attribute? The tag name is read through
+         the cached getter, so a spoofed nodeName (e.g. an <a> claiming to
+         be an "IMG") can not unlock data: URIs (GHSA-x4vx-rjvf-j5p4) */
+      const lcTag = stringToLowerCase(_getNodeName(currentNode));
       if (!_isValidAttribute(lcTag, lcName, value)) {
         continue;
       }
