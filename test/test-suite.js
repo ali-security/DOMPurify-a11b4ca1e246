@@ -1717,17 +1717,47 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
   QUnit.test(
     'Test against data URIs in anchors without proper config flag',
     function (assert) {
-      var clean = DOMPurify.sanitize('<a href="data:image/gif;base64,123">icon.gif</a>');
+      var clean = DOMPurify.sanitize(
+        '<a href="data:image/gif;base64,123">icon.gif</a>'
+      );
       assert.equal(clean, '<a>icon.gif</a>');
     }
   );
   QUnit.test(
     'Test against data URIs in anchors using proper config flag',
     function (assert) {
-      var clean = DOMPurify.sanitize('<a href="data:image/gif;base64,123">icon.gif</a>', {
-          ADD_DATA_URI_TAGS: ['a', 'b']
-      });
+      var clean = DOMPurify.sanitize(
+        '<a href="data:image/gif;base64,123">icon.gif</a>',
+        {
+          ADD_DATA_URI_TAGS: ['a', 'b'],
+        }
+      );
       assert.equal(clean, '<a href="data:image/gif;base64,123">icon.gif</a>');
+    }
+  );
+  QUnit.test(
+    'Test against nesting-based mXSS via form and table namespace confusion',
+    function (assert) {
+      var payloads = [
+        '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
+        '<math><mtext><table><mglyph><style></math><img src onerror=alert(1)>',
+      ];
+      payloads.forEach(function (payload) {
+        var clean = DOMPurify.sanitize(payload);
+        /* Re-parse the sanitized markup in an inert document (sink roundtrip) */
+        var doc = document.implementation.createHTMLDocument('');
+        doc.body.innerHTML = clean;
+        assert.equal(
+          clean.indexOf('<math'),
+          -1,
+          'math with nested form/table is removed: ' + clean
+        );
+        assert.equal(
+          doc.body.querySelectorAll('img').length,
+          0,
+          'no <img> is created after the serialize-parse roundtrip: ' + clean
+        );
+      });
     }
   );
   QUnit.test(
