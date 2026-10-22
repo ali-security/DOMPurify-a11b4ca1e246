@@ -2664,6 +2664,277 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
       assert.equal(plain.querySelectorAll('input').length, 1, 'input is kept');
     }
   );
+  /* GHSA-hpcv-96wg-7vj8: nodes of a foreign realm (e.g. a same-origin
+     iframe document) handed to DOMPurify with IN_PLACE. Realm-bound
+     `instanceof` checks against the instance's own constructors
+     short-circuited to false for them and silently skipped sanitization:
+     the root kept its event handlers, clobbered form roots were not refused
+     and <template>.content was never walked. */
+  /* A DOMPurify instance whose constructors are not on the prototype chain
+     of this document's nodes, which is exactly what an instance sees for
+     nodes of a foreign realm. The constructors' prototypes still reach the
+     real prototype getters, as the getters of one realm work on the nodes
+     of any realm. This reproduces the realm mismatch in every engine, also
+     where iframes share the parent's constructors (jsdom) or where
+     `instanceof` on DOM interfaces is cross-realm aware (Gecko). */
+  var createRealmBoundPurify = function () {
+    var view = {
+      document: document,
+      HTMLTemplateElement: window.HTMLTemplateElement,
+      NodeFilter: window.NodeFilter,
+      DOMParser: window.DOMParser,
+    };
+    [
+      'Node',
+      'Element',
+      'DocumentFragment',
+      'NamedNodeMap',
+      'Text',
+      'Comment',
+    ].forEach(function (name) {
+      if (window[name] && window[name].prototype) {
+        var ForeignRealmConstructor = function () {};
+        ForeignRealmConstructor.prototype = Object.create(
+          window[name].prototype
+        );
+        view[name] = ForeignRealmConstructor;
+      }
+    });
+    return DOMPurify(view);
+  };
+  /* Run a scenario against every available foreign realm: the realm-bound
+     instance above on this document's nodes, and this instance on the nodes
+     of a same-origin iframe document when the engine can provide one. */
+  var forEachForeignRealm = function (callback) {
+    var realmBoundPurify = createRealmBoundPurify();
+    callback(realmBoundPurify, document, 'realm-bound instance');
+
+    var iframe = null;
+    var foreignDoc = null;
+    try {
+      iframe = document.createElement('iframe');
+      iframe.srcdoc = '<!doctype html><html><body></body></html>';
+      document.body.appendChild(iframe);
+      foreignDoc = iframe.contentDocument;
+    } catch (_) {
+      foreignDoc = null;
+    }
+
+    if (!foreignDoc || typeof foreignDoc.createElement !== 'function') {
+      if (iframe && iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe);
+      }
+
+      return;
+    }
+
+    try {
+      callback(DOMPurify, foreignDoc, 'iframe document');
+    } finally {
+      iframe.parentNode.removeChild(iframe);
+    }
+  };
+  /* Clobber form[name] with a named child of the form's own realm. Engines
+     without form named properties get the shadowing simulated through an
+     own property, like clobberForm() above. */
+  var clobberForeignForm = function (form, name) {
+    var child = form.ownerDocument.createElement('input');
+    child.setAttribute('name', name);
+    form.appendChild(child);
+    if (form[name] !== child) {
+      Object.defineProperty(form, name, { value: child, configurable: true });
+    }
+
+    return form;
+  };
+  QUnit.test(
+    'GHSA-hpcv-96wg-7vj8: IN_PLACE root of a foreign realm and its children are sanitized',
+    function (assert) {
+      forEachForeignRealm(function (purify, doc, realm) {
+        var root = doc.createElement('div');
+        root.setAttribute('onmouseover', 'window.__hpcv_root_xss = 1');
+        var link = doc.createElement('a');
+        link.setAttribute('href', 'javascript:alert(1)');
+        link.setAttribute('onclick', 'window.__hpcv_child_xss = 1');
+        link.appendChild(doc.createTextNode('safe'));
+        root.appendChild(link);
+        root.appendChild(doc.createTextNode(' text'));
+        root.appendChild(doc.createComment('note'));
+        var script = doc.createElement('script');
+        script.textContent = 'window.__hpcv_script_xss = 1';
+        root.appendChild(script);
+
+        var clean = purify.sanitize(root, { IN_PLACE: true });
+        assert.strictEqual(
+          clean,
+          root,
+          realm + ': the root node itself is returned'
+        );
+        assert.equal(
+          root.hasAttribute('onmouseover'),
+          false,
+          realm + ': onmouseover is removed from the foreign-realm root'
+        );
+        assert.equal(
+          root.querySelectorAll('script').length,
+          0,
+          realm + ': foreign-realm script child is removed'
+        );
+        var kept = root.querySelector('a');
+        assert.ok(kept, realm + ': allowed foreign-realm child element is kept');
+        assert.equal(
+          kept && kept.hasAttribute('onclick'),
+          false,
+          realm + ': onclick is removed from the foreign-realm child'
+        );
+        assert.equal(
+          kept && kept.hasAttribute('href'),
+          false,
+          realm + ': javascript: href is removed from the foreign-realm child'
+        );
+        assert.equal(
+          root.textContent,
+          'safe text',
+          realm + ': foreign-realm text nodes are kept'
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'GHSA-hpcv-96wg-7vj8: clobbered form root of a foreign realm throws on IN_PLACE',
+    function (assert) {
+      forEachForeignRealm(function (purify, doc, realm) {
+        ['attributes', 'nodeName', 'childNodes'].forEach(function (name) {
+          var form = doc.createElement('form');
+          form.setAttribute('onmouseover', 'window.__hpcv_form_xss = 1');
+          form.setAttribute('action', 'javascript:alert(1)');
+          clobberForeignForm(form, name);
+          var message = null;
+          try {
+            purify.sanitize(form, { IN_PLACE: true });
+          } catch (error) {
+            message = String(error && error.message);
+          }
+
+          assert.ok(
+            /clobbered/.test(message || ''),
+            realm +
+              ': foreign-realm form root clobbered by name="' +
+              name +
+              '" must throw, got: ' +
+              message +
+              ', onmouseover kept: ' +
+              form.hasAttribute('onmouseover')
+          );
+        });
+
+        // The advisory's PoC: a clobbered form below a foreign-realm root
+        var wrapper = doc.createElement('div');
+        var nested = doc.createElement('form');
+        nested.setAttribute('onmouseover', 'window.__hpcv_nested_xss = 1');
+        clobberForeignForm(nested, 'attributes');
+        wrapper.appendChild(nested);
+        purify.sanitize(wrapper, { IN_PLACE: true });
+        var forms = wrapper.querySelectorAll('form');
+        assert.ok(
+          forms.length === 0 || !forms[0].hasAttribute('onmouseover'),
+          realm +
+            ': clobbered foreign-realm form keeps no onmouseover: ' +
+            wrapper.innerHTML
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'GHSA-hpcv-96wg-7vj8: foreign-realm form root clobbering nodeType is sanitized in place',
+    function (assert) {
+      forEachForeignRealm(function (purify, doc, realm) {
+        // A clobbered nodeType used to fail the realm-bound node check, so
+        // the root was stringified and the caller's node never sanitized
+        var root = clobberForeignForm(doc.createElement('form'), 'nodeType');
+        root.setAttribute('onmouseover', 'window.__hpcv_nodetype_xss = 1');
+        root.setAttribute('action', 'javascript:alert(1)');
+        var clean = purify.sanitize(root, { IN_PLACE: true });
+        assert.strictEqual(
+          clean,
+          root,
+          realm + ': the root node itself is returned'
+        );
+        assert.equal(
+          root.hasAttribute('onmouseover'),
+          false,
+          realm + ': onmouseover is removed from the foreign-realm root'
+        );
+        assert.equal(
+          root.hasAttribute('action'),
+          false,
+          realm + ': javascript: action is removed from the foreign-realm root'
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'GHSA-hpcv-96wg-7vj8: foreign-realm <template>.content is walked and sanitized',
+    function (assert) {
+      forEachForeignRealm(function (purify, doc, realm) {
+        var wrapper = doc.createElement('div');
+        var tpl = doc.createElement('template');
+        if (!tpl.content || typeof tpl.content.querySelector !== 'function') {
+          assert.ok(true, realm + ': SKIP: no template content support');
+          return;
+        }
+
+        tpl.innerHTML = '<img src="x" onerror="window.__hpcv_tpl_xss = 1">';
+        if (!tpl.content.querySelector('img')) {
+          // The innerHTML setter does not target the template contents in
+          // this engine, build them through the inert contents document
+          while (tpl.firstChild) {
+            tpl.removeChild(tpl.firstChild);
+          }
+
+          var inertImg = tpl.content.ownerDocument.createElement('img');
+          inertImg.setAttribute('src', 'x');
+          inertImg.setAttribute('onerror', 'window.__hpcv_tpl_xss = 1');
+          tpl.content.appendChild(inertImg);
+        }
+
+        wrapper.appendChild(tpl);
+        purify.sanitize(wrapper, { IN_PLACE: true });
+
+        assert.equal(
+          wrapper.querySelectorAll('template').length,
+          1,
+          realm + ': the foreign-realm template is kept'
+        );
+        var img = tpl.content.querySelector('img');
+        assert.ok(img, realm + ': template content was reached');
+        assert.equal(
+          img && img.getAttribute('onerror'),
+          null,
+          realm + ': onerror inside foreign-realm <template> must be stripped'
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'GHSA-hpcv-96wg-7vj8: foreign-realm element with a forbidden namespace is removed',
+    function (assert) {
+      forEachForeignRealm(function (purify, doc, realm) {
+        var wrapper = doc.createElement('div');
+        var weird = doc.createElementNS('urn:example:not-allowed', 'weird');
+        weird.setAttribute('onclick', 'window.__hpcv_ns_xss = 1');
+        wrapper.appendChild(weird);
+
+        purify.sanitize(wrapper, { IN_PLACE: true });
+
+        assert.equal(
+          wrapper.getElementsByTagName('weird').length,
+          0,
+          realm + ': foreign-realm bad-namespace element must be removed'
+        );
+      });
+    }
+  );
   QUnit.test(
     'Test protection from prototype pollution of documentMode',
     function (assert) {
