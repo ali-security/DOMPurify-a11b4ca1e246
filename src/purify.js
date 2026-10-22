@@ -725,6 +725,14 @@ function createDOMPurify(window = getGlobal()) {
       typeof elm.namespaceURI !== 'string' ||
       typeof elm.insertBefore !== 'function' ||
       typeof elm.hasChildNodes !== 'function' ||
+      /* NodeType clobbering probe. The cached Node.prototype.nodeType getter
+         returns the integer 1 for any element regardless of realm, while a
+         direct read on a clobbered form (e.g. <input name="nodeType">)
+         returns the named child element. This removes a residual clobbering
+         surface, the nesting depth bookkeeping and several branches compare
+         currentNode.nodeType directly. Skipped when the getter is not
+         available, so a missing getter can not flag every element. */
+      (nodeType !== null && elm.nodeType !== nodeType) ||
       /* HTMLFormElement has [LegacyOverrideBuiltIns]: a descendant named
          "childNodes" shadows the prototype getter. Compare the direct read
          to the cached Node.prototype getter, the two values differ when the
