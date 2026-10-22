@@ -17,9 +17,11 @@ import {
   stringToLowerCase,
   stringIndexOf,
   stringTrim,
+  numberIsNaN,
   regExpTest,
   regExpCreate,
   typeErrorCreate,
+  lookupGetter,
 } from './utils';
 
 const getGlobal = () => (typeof window === 'undefined' ? null : window);
@@ -104,11 +106,15 @@ function createDOMPurify(window = getGlobal()) {
     Node,
     NodeFilter,
     NamedNodeMap = window.NamedNodeMap || window.MozNamedAttrMap,
+    Element,
     Text,
     Comment,
     DOMParser,
     trustedTypes,
   } = window;
+
+  const ElementPrototype = Element.prototype;
+  const getParentNode = lookupGetter(ElementPrototype, 'parentNode');
 
   // As per issue #47, the web-components registry is inherited by a
   // new document created via createHTMLDocument. As per the spec
@@ -307,6 +313,9 @@ function createDOMPurify(window = getGlobal()) {
     'style',
     'xmlns',
   ]);
+
+  /* Specify the maximum element nesting depth to prevent mXSS */
+  const MAX_NESTING_DEPTH = 255;
 
   /* Keep a reference to config to pass to hooks */
   let CONFIG = null;
@@ -591,6 +600,24 @@ function createDOMPurify(window = getGlobal()) {
     }
 
     return false;
+  };
+
+  /**
+   * _isDepthTampered
+   *
+   * @param  {Node} elm element to check the nesting depth bookkeeping of
+   * @return {Boolean} true if __depth or __removalCount are not sane numbers,
+   * e.g. because they were clobbered or polluted through Object.prototype
+   */
+  const _isDepthTampered = function (elm) {
+    const removalCount = elm.__removalCount || 0;
+
+    return (
+      typeof elm.__depth !== 'number' ||
+      elm.__depth < 1 ||
+      typeof removalCount !== 'number' ||
+      removalCount < 0
+    );
   };
 
   /**
@@ -984,8 +1011,37 @@ function createDOMPurify(window = getGlobal()) {
         continue;
       }
 
+      const parentNode = getParentNode(shadowNode);
+
+      /* Set the nesting depth of an element */
+      if (shadowNode.nodeType === 1) {
+        if (parentNode && parentNode.__depth) {
+          /*
+            We want the depth of the node in the original tree, which can
+            change when it's removed from its parent.
+          */
+          shadowNode.__depth =
+            (shadowNode.__removalCount || 0) + parentNode.__depth + 1;
+        } else {
+          shadowNode.__depth = 1;
+        }
+      }
+
+      /*
+       * Remove an element if nested too deeply to avoid mXSS
+       * or if the __depth might have been tampered with
+       */
+      if (
+        shadowNode.__depth >= MAX_NESTING_DEPTH ||
+        numberIsNaN(shadowNode.__depth) ||
+        (shadowNode.nodeType === 1 && _isDepthTampered(shadowNode))
+      ) {
+        _forceRemove(shadowNode);
+      }
+
       /* Deep shadow DOM detected */
       if (shadowNode.content instanceof DocumentFragment) {
+        shadowNode.content.__depth = shadowNode.__depth;
         _sanitizeShadowDOM(shadowNode.content);
       }
 

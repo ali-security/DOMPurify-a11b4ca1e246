@@ -1287,6 +1287,112 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
       '<p></p><title>&lt;a href="</title>qqq',
     ]);
   });
+
+  /* Helpers for the nesting depth tests below */
+  var nestedMarkup = function (tag, depth, inner) {
+    return (
+      new Array(depth + 1).join('<' + tag + '>') +
+      inner +
+      new Array(depth + 1).join('</' + tag + '>')
+    );
+  };
+
+  var countTags = function (html, tag) {
+    return html.split('<' + tag + '>').length - 1;
+  };
+
+  QUnit.test('Test nesting depth limit inside template content', function (
+    assert
+  ) {
+    var clean = DOMPurify.sanitize(
+      '<p><template>' + nestedMarkup('div', 300, '<img>') + '</template></p>'
+    );
+    var depth = countTags(clean, 'div');
+    assert.ok(depth < 255, 'Nesting depth is limited, got ' + depth);
+    assert.ok(depth > 200, 'Moderate nesting is kept, got ' + depth);
+    assert.equal(clean.indexOf('<img'), -1, 'Deeply nested <img> is removed');
+  });
+  QUnit.test(
+    'Test nesting depth limit inside template content with clobbered parentNode',
+    function (assert) {
+      var clean = DOMPurify.sanitize(
+        '<p><template>' +
+          nestedMarkup(
+            'div',
+            200,
+            '<form><input name="parentNode">' +
+              nestedMarkup('div', 100, '<img>') +
+              '</form>'
+          ) +
+          '</template></p>'
+      );
+      var depth = countTags(clean, 'div');
+      assert.ok(depth < 255, 'Nesting depth is limited, got ' + depth);
+      assert.ok(depth > 200, 'Moderate nesting is kept, got ' + depth);
+      assert.equal(
+        clean.indexOf('<img'),
+        -1,
+        'Deeply nested <img> is removed'
+      );
+    }
+  );
+  QUnit.test(
+    'Test nesting depth limit inside template content with clobbered __removalCount',
+    function (assert) {
+      var clean = DOMPurify.sanitize(
+        '<p><template><div><form><input name="__removalCount">' +
+          nestedMarkup('div', 300, '<img>') +
+          '</form></div></template></p>'
+      );
+      var depth = countTags(clean, 'div');
+      assert.ok(depth < 255, 'Nesting depth is limited, got ' + depth);
+      assert.equal(
+        clean.indexOf('<img'),
+        -1,
+        'Deeply nested <img> is removed'
+      );
+    }
+  );
+  QUnit.test(
+    'Test nesting depth limit inside template content against prototype pollution',
+    function (assert) {
+      var dirty =
+        '<p><template>' + nestedMarkup('div', 300, '<img>') + '</template></p>';
+      var pollutions = [
+        ['__depth', 'x'],
+        ['__depth', -1000],
+        ['__removalCount', -1],
+        ['__removalCount', 'x'],
+        [
+          '__removalCount',
+          {
+            valueOf: function () {
+              return NaN;
+            },
+          },
+        ],
+      ];
+      pollutions.forEach(function (pollution) {
+        var clean;
+        var label =
+          'Object.prototype.' + pollution[0] + ' = ' + String(pollution[1]);
+        Object.prototype[pollution[0]] = pollution[1];
+        try {
+          clean = DOMPurify.sanitize(dirty);
+        } finally {
+          delete Object.prototype[pollution[0]];
+        }
+
+        var depth = countTags(clean, 'div');
+        assert.ok(depth < 255, label + ': nesting depth is limited, got ' + depth);
+        assert.equal(
+          clean.indexOf('<img'),
+          -1,
+          label + ': deeply nested <img> is removed'
+        );
+      });
+    }
+  );
   QUnit.test(
     'Test for correct return value when RETURN_TRUSTED_TYPE is true',
     function (assert) {
