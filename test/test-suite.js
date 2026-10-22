@@ -1158,6 +1158,146 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
       }
     }
   );
+
+  // -------------------------------------------------------------------
+  // USE_PROFILES used to reset ALLOWED_ATTR to a plain array, which only
+  // lost its prototype once a profile (or ADD_ATTR) added attributes to
+  // it. With no attribute-bearing profile enabled, a polluted
+  // Object.prototype / Array.prototype key such as `onerror` was then
+  // treated as an allowed attribute. (CVE-2026-65913)
+  // -------------------------------------------------------------------
+
+  QUnit.test(
+    'USE_PROFILES: allowed attributes are not inherited from polluted prototypes',
+    function (assert) {
+      var dirty = '<img src="x" onerror="alert(1)">';
+      // Without an explicit FORBID_ATTR the default FORBID_ATTR is a plain
+      // object that inherits the polluted key as well, so the configs that
+      // set FORBID_ATTR are the ones that reach ALLOWED_ATTR through a
+      // polluted Object.prototype.
+      var configs = [
+        { USE_PROFILES: {}, ADD_TAGS: ['img'] },
+        { USE_PROFILES: {}, ADD_TAGS: ['img'], FORBID_ATTR: ['style'] },
+        { USE_PROFILES: { html: false }, ADD_TAGS: ['img'] },
+        {
+          USE_PROFILES: { html: false },
+          ADD_TAGS: ['img'],
+          FORBID_ATTR: ['style'],
+        },
+        { USE_PROFILES: { svg: false, mathMl: false }, ADD_TAGS: ['img'] },
+        { USE_PROFILES: { html: true } },
+        { USE_PROFILES: { html: true }, FORBID_ATTR: ['style'] },
+      ];
+      var prototypes = [
+        ['Object.prototype', Object.prototype],
+        ['Array.prototype', Array.prototype],
+      ];
+      prototypes.forEach(function (proto) {
+        configs.forEach(function (config) {
+          var clean;
+          var label = proto[0] + '.onerror = true, ' + JSON.stringify(config);
+          proto[1].onerror = true;
+          try {
+            clean = DOMPurify.sanitize(dirty, config);
+          } finally {
+            delete proto[1].onerror;
+          }
+
+          assert.equal(
+            clean.indexOf('onerror'),
+            -1,
+            label + ': onerror is removed, got ' + clean
+          );
+          assert.equal(
+            clean.indexOf('<img'),
+            0,
+            label + ': <img> is kept, got ' + clean
+          );
+        });
+      });
+    }
+  );
+
+  // -------------------------------------------------------------------
+  // FORBID_ATTR is documented to override every allow rule, but the
+  // ALLOW_DATA_ATTR and ALLOW_ARIA_ATTR branches used to accept data-* and
+  // aria-* attributes before FORBID_ATTR was consulted. (CVE-2026-65913)
+  // -------------------------------------------------------------------
+
+  QUnit.test(
+    'FORBID_ATTR always wins over ALLOW_DATA_ATTR, ALLOW_ARIA_ATTR and ADD_ATTR',
+    function (assert) {
+      assert.equal(
+        DOMPurify.sanitize('<div data-foo="1" data-bar="2">abc</div>', {
+          FORBID_ATTR: ['data-foo'],
+        }),
+        '<div data-bar="2">abc</div>',
+        'forbidden data-* is removed with the default ALLOW_DATA_ATTR'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<div data-foo="1">abc</div>', {
+          ALLOW_DATA_ATTR: true,
+          FORBID_ATTR: ['data-foo'],
+        }),
+        '<div>abc</div>',
+        'forbidden data-* is removed with an explicit ALLOW_DATA_ATTR'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<div data-foo="1">abc</div>', {
+          ADD_ATTR: ['data-foo'],
+          FORBID_ATTR: ['data-foo'],
+        }),
+        '<div>abc</div>',
+        'forbidden data-* is removed even when listed in ADD_ATTR'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<a href="#" aria-label="x">abc</a>', {
+          FORBID_ATTR: ['aria-label'],
+        }),
+        '<a href="#">abc</a>',
+        'forbidden aria-* is removed with the default ALLOW_ARIA_ATTR'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<a href="#" aria-label="x">abc</a>', {
+          ALLOW_ARIA_ATTR: true,
+          FORBID_ATTR: ['ARIA-LABEL'],
+        }),
+        '<a href="#">abc</a>',
+        'forbidden aria-* is removed with an explicit ALLOW_ARIA_ATTR'
+      );
+      assert.contains(
+        DOMPurify.sanitize('<a href="#" aria-label="x">abc</a>', {
+          FORBID_ATTR: ['data-foo'],
+        }),
+        [
+          '<a href="#" aria-label="x">abc</a>',
+          '<a aria-label="x" href="#">abc</a>',
+        ],
+        'aria-* that is not forbidden is still kept'
+      );
+
+      DOMPurify.setConfig({ FORBID_ATTR: ['data-foo', 'aria-label'] });
+      try {
+        assert.strictEqual(
+          DOMPurify.isValidAttribute('div', 'data-foo', '1'),
+          false,
+          'isValidAttribute rejects a forbidden data-* attribute'
+        );
+        assert.strictEqual(
+          DOMPurify.isValidAttribute('div', 'aria-label', 'x'),
+          false,
+          'isValidAttribute rejects a forbidden aria-* attribute'
+        );
+        assert.strictEqual(
+          DOMPurify.isValidAttribute('div', 'data-bar', '1'),
+          true,
+          'isValidAttribute still accepts a data-* attribute that is not forbidden'
+        );
+      } finally {
+        DOMPurify.clearConfig();
+      }
+    }
+  );
   QUnit.test(
     'sanitize() should allow unknown protocols when ALLOW_UNKNOWN_PROTOCOLS is true',
     function (assert) {

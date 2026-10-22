@@ -149,6 +149,7 @@ export {
   arrayPush,
   arraySlice,
   // Object
+  create,
   freeze,
   hasOwnProperty,
   isFrozen,

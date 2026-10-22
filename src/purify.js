@@ -4,6 +4,7 @@ import * as EXPRESSIONS from './regexp';
 import {
   addToSet,
   clone,
+  create,
   freeze,
   objectKeys,
   arrayForEach,
@@ -446,7 +447,7 @@ function createDOMPurify(window = getGlobal()) {
     /* Parse profile info */
     if (USE_PROFILES) {
       ALLOWED_TAGS = addToSet({}, [...TAGS.text]);
-      ALLOWED_ATTR = [];
+      ALLOWED_ATTR = create(null);
       if (USE_PROFILES.html === true) {
         addToSet(ALLOWED_TAGS, TAGS.html);
         addToSet(ALLOWED_ATTR, ATTRS.html);
@@ -873,6 +874,12 @@ function createDOMPurify(window = getGlobal()) {
    */
   // eslint-disable-next-line complexity
   const _isValidAttribute = function (lcTag, lcName, value) {
+    /* FORBID_ATTR must always win, even if ALLOW_DATA_ATTR or
+       ALLOW_ARIA_ATTR would allow it */
+    if (FORBID_ATTR[lcName]) {
+      return false;
+    }
+
     /* Make sure attribute cannot clobber */
     if (
       SANITIZE_DOM &&
