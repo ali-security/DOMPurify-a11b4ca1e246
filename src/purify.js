@@ -1401,6 +1401,19 @@ function createDOMPurify(window = getGlobal()) {
 
     /* Return sanitized string or DOM */
     if (RETURN_DOM) {
+      /* Sanitize final DOM template-safe, template expressions can be split
+         across several text nodes and survive the per-node pass */
+      if (SAFE_FOR_TEMPLATES) {
+        body.normalize();
+        let html = body.innerHTML;
+        arrayForEach([MUSTACHE_EXPR, ERB_EXPR], (expr) => {
+          html = stringReplace(html, expr, ' ');
+        });
+        body.innerHTML = trustedTypesPolicy
+          ? trustedTypesPolicy.createHTML(html)
+          : html;
+      }
+
       if (RETURN_DOM_FRAGMENT) {
         returnNode = createDocumentFragment.call(body.ownerDocument);
 

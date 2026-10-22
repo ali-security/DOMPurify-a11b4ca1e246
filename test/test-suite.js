@@ -595,6 +595,79 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
     assert.notEqual(fragment.ownerDocument, document);
     assert.equal(fragment.firstChild && fragment.firstChild.nodeValue, 'foo');
   });
+  QUnit.test(
+    'Config-Flag tests: SAFE_FOR_TEMPLATES with RETURN_DOM / RETURN_DOM_FRAGMENT',
+    function (assert) {
+      // Template expressions split across text nodes by removed elements
+      // must not survive when the result is returned as DOM
+      var hasTemplateExpr = function (str) {
+        return (
+          str.indexOf('{{') !== -1 ||
+          str.indexOf('}}') !== -1 ||
+          str.indexOf('<%') !== -1 ||
+          str.indexOf('%>') !== -1
+        );
+      };
+      var dirty =
+        '<div id="app">{<foo></foo>{constructor.constructor("alert(1)")()}<foo></foo>}</div>';
+      // RETURN_DOM
+      var dom = DOMPurify.sanitize(dirty, {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM: true,
+      });
+      assert.ok(!hasTemplateExpr(dom.textContent), dom.textContent);
+      assert.equal(dom.outerHTML, '<body> </body>');
+      dom = DOMPurify.sanitize('{<x>{333+333}<x>}', {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM: true,
+      });
+      assert.ok(!hasTemplateExpr(dom.textContent), dom.textContent);
+      assert.equal(dom.outerHTML, '<body> </body>');
+      // RETURN_DOM + RETURN_DOM_IMPORT
+      dom = DOMPurify.sanitize(dirty, {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM: true,
+        RETURN_DOM_IMPORT: true,
+      });
+      assert.ok(!hasTemplateExpr(dom.textContent), dom.textContent);
+      assert.equal(dom.ownerDocument, document);
+      // RETURN_DOM + WHOLE_DOCUMENT
+      dom = DOMPurify.sanitize(dirty, {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM: true,
+        WHOLE_DOCUMENT: true,
+      });
+      assert.ok(!hasTemplateExpr(dom.textContent), dom.textContent);
+      // RETURN_DOM_FRAGMENT
+      var fragment = DOMPurify.sanitize(dirty, {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM_FRAGMENT: true,
+      });
+      assert.equal(fragment.nodeType, 11);
+      assert.ok(!hasTemplateExpr(fragment.textContent), fragment.textContent);
+      assert.equal(fragment.textContent, ' ');
+      fragment = DOMPurify.sanitize('{<x>{333+333}<x>}', {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM_FRAGMENT: true,
+      });
+      assert.ok(!hasTemplateExpr(fragment.textContent), fragment.textContent);
+      // RETURN_DOM_FRAGMENT + RETURN_DOM_IMPORT
+      fragment = DOMPurify.sanitize(dirty, {
+        SAFE_FOR_TEMPLATES: true,
+        RETURN_DOM_FRAGMENT: true,
+        RETURN_DOM_IMPORT: true,
+      });
+      assert.ok(!hasTemplateExpr(fragment.textContent), fragment.textContent);
+      // Template-free content is left untouched
+      assert.equal(
+        DOMPurify.sanitize('<a>123<b>456</b></a>', {
+          SAFE_FOR_TEMPLATES: true,
+          RETURN_DOM: true,
+        }).outerHTML,
+        '<body><a>123<b>456</b></a></body>'
+      );
+    }
+  );
   QUnit.test('Config-Flag tests: IN_PLACE', function (assert) {
     //IN_PLACE
     var dirty = document.createElement('a');
