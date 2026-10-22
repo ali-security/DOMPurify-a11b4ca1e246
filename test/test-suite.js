@@ -1298,6 +1298,157 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
       }
     }
   );
+
+  // -------------------------------------------------------------------
+  // Sanitized markup that is later re-inserted into a raw text wrapper
+  // (e.g. sink.innerHTML = '<xmp>' + clean + '</xmp>') must not be able
+  // to close that wrapper and smuggle live markup (CVE-2026-65914).
+  // -------------------------------------------------------------------
+
+  var reContextWrappers = [
+    'script',
+    'xmp',
+    'textarea',
+    'noscript',
+    'iframe',
+    'noembed',
+    'noframes',
+    'style',
+    'title',
+  ];
+
+  /* Re-parse sanitized markup inside a wrapper element (sink roundtrip) and
+   * count the elements carrying an event handler that come to life */
+  var liveHandlersInWrapper = function (wrapper, clean) {
+    var doc = document.implementation.createHTMLDocument('');
+    doc.body.innerHTML = '<' + wrapper + '>' + clean + '</' + wrapper + '>';
+    return doc.querySelectorAll('[onerror]').length;
+  };
+
+  QUnit.test(
+    'Test against mXSS via re-contextualization of attribute values',
+    function (assert) {
+      reContextWrappers.forEach(function (wrapper) {
+        var dirty =
+          '<img src="x" alt="</' +
+          wrapper +
+          '><img src=x onerror=alert(1)>">';
+        var clean = DOMPurify.sanitize(dirty);
+        assert.equal(
+          clean,
+          '<img src="x">',
+          'attribute closing </' + wrapper + '> is removed: ' + clean
+        );
+        assert.equal(
+          liveHandlersInWrapper(wrapper, clean),
+          0,
+          'no live handler after re-parsing inside <' + wrapper + '>: ' + clean
+        );
+        assert.equal(
+          DOMPurify.sanitize(
+            '<img src="x" alt="</' + wrapper.toUpperCase() + ' >">'
+          ),
+          '<img src="x">',
+          'end tag check is case-insensitive for ' + wrapper
+        );
+      });
+      assert.equal(
+        DOMPurify.sanitize(
+          '<a href="#" title="a &lt;/xmp&gt; b">x</a><img alt="--><img src=x onerror=alert(1)>"><img alt="--!><img src=x onerror=alert(1)>"><img alt="]]><img src=x onerror=alert(1)>">'
+        ),
+        '<a href="#">x</a><img><img><img>',
+        'comment and CDATA closers inside attributes are removed'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<img src="x" alt="</div> <b>bold</b> -> ok">'),
+        DOMPurify.sanitize('<img src="x" alt="</div> <b>bold</b> -> ok">', {
+          SAFE_FOR_XML: true,
+        }),
+        'SAFE_FOR_XML is enabled by default'
+      );
+      assert.notEqual(
+        DOMPurify.sanitize('<img src="x" alt="</div> <b>bold</b> -> ok">')
+          .indexOf('alt='),
+        -1,
+        'harmless markup inside attributes is kept'
+      );
+      assert.notEqual(
+        DOMPurify.sanitize(
+          '<img src="x" alt="</xmp><img src=x onerror=alert(1)>">',
+          { SAFE_FOR_XML: false }
+        ).indexOf('alt='),
+        -1,
+        'SAFE_FOR_XML: false keeps the attribute'
+      );
+    }
+  );
+  QUnit.test(
+    'Test against mXSS via re-contextualization of raw text content',
+    function (assert) {
+      reContextWrappers.forEach(function (wrapper) {
+        if (wrapper === 'style') {
+          return;
+        }
+
+        var dirty =
+          '<p>a<style></' +
+          wrapper +
+          '><img src=x onerror=alert(1)></style></p>';
+        var clean = DOMPurify.sanitize(dirty);
+        assert.equal(
+          clean,
+          '<p>a</p>',
+          'style text closing </' + wrapper + '> is removed: ' + clean
+        );
+        assert.equal(
+          liveHandlersInWrapper(wrapper, clean),
+          0,
+          'no live handler after re-parsing inside <' + wrapper + '>: ' + clean
+        );
+      });
+      reContextWrappers.forEach(function (wrapper) {
+        var clean = DOMPurify.sanitize(
+          '<p>a<!--</' + wrapper + '><img src=x onerror=alert(1)>--></p>',
+          { ADD_TAGS: ['#comment'] }
+        );
+        assert.equal(
+          clean,
+          '<p>a</p>',
+          'comment closing </' + wrapper + '> is removed: ' + clean
+        );
+        assert.equal(
+          liveHandlersInWrapper(wrapper, clean),
+          0,
+          'no live handler after re-parsing inside <' + wrapper + '>: ' + clean
+        );
+      });
+      assert.equal(
+        DOMPurify.sanitize('<p>a<style>*{color:red}</style></p>'),
+        '<p>a<style>*{color:red}</style></p>',
+        'harmless style content is kept'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<p>a<!-- hello --></p>', {
+          ADD_TAGS: ['#comment'],
+        }),
+        '<p>a<!-- hello --></p>',
+        'harmless comments are kept'
+      );
+      assert.equal(
+        DOMPurify.sanitize('<p>&lt;/xmp&gt;<textarea></xmp></textarea></p>'),
+        '<p>&lt;/xmp&gt;<textarea>&lt;/xmp&gt;</textarea></p>',
+        'escaped text is kept'
+      );
+      assert.equal(
+        DOMPurify.sanitize(
+          '<p>a<style></xmp><img src=x onerror=alert(1)></style></p>',
+          { SAFE_FOR_XML: false }
+        ),
+        '<p>a<style></xmp><img src=x onerror=alert(1)></style></p>',
+        'SAFE_FOR_XML: false keeps the raw text'
+      );
+    }
+  );
   QUnit.test(
     'sanitize() should allow unknown protocols when ALLOW_UNKNOWN_PROTOCOLS is true',
     function (assert) {

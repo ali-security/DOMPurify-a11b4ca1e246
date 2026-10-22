@@ -254,6 +254,13 @@ function createDOMPurify(window = getGlobal()) {
    */
   let SAFE_FOR_TEMPLATES = false;
 
+  /* Output should be safe even for XML used within HTML and alike.
+   * This means, DOMPurify removes attributes, comments and raw text
+   * elements containing risky content, such as comment closers or end tags
+   * of raw text elements (e.g. </xmp>, </noscript>).
+   */
+  let SAFE_FOR_XML = true;
+
   /* Decide if document with <html>... should be returned */
   let WHOLE_DOCUMENT = false;
 
@@ -426,6 +433,7 @@ function createDOMPurify(window = getGlobal()) {
     ALLOW_UNKNOWN_PROTOCOLS = cfg.ALLOW_UNKNOWN_PROTOCOLS || false; // Default false
     SAFE_FOR_JQUERY = cfg.SAFE_FOR_JQUERY || false; // Default false
     SAFE_FOR_TEMPLATES = cfg.SAFE_FOR_TEMPLATES || false; // Default false
+    SAFE_FOR_XML = cfg.SAFE_FOR_XML !== false; // Default true
     WHOLE_DOCUMENT = cfg.WHOLE_DOCUMENT || false; // Default false
     RETURN_DOM = cfg.RETURN_DOM || false; // Default false
     RETURN_DOM_FRAGMENT = cfg.RETURN_DOM_FRAGMENT || false; // Default false
@@ -823,6 +831,39 @@ function createDOMPurify(window = getGlobal()) {
       return true;
     }
 
+    /* Remove raw text content (e.g. of style) that is serialized verbatim
+     * and could close a wrapping raw text element when re-parsed */
+    if (
+      SAFE_FOR_XML &&
+      !currentNode.firstElementChild &&
+      (!currentNode.content || !currentNode.content.firstElementChild) &&
+      regExpTest(
+        /<\/(style|script|title|xmp|textarea|noscript|iframe|noembed|noframes)/i,
+        currentNode.innerHTML
+      ) &&
+      regExpTest(
+        /<\/(style|script|title|xmp|textarea|noscript|iframe|noembed|noframes)/i,
+        currentNode.textContent
+      )
+    ) {
+      _forceRemove(currentNode);
+      return true;
+    }
+
+    /* Comment data is serialized verbatim as well, remove comments that
+     * could close a wrapping raw text element when re-parsed */
+    if (
+      SAFE_FOR_XML &&
+      currentNode.nodeType === 8 &&
+      regExpTest(
+        /<\/(style|script|title|xmp|textarea|noscript|iframe|noembed|noframes)/i,
+        currentNode.data
+      )
+    ) {
+      _forceRemove(currentNode);
+      return true;
+    }
+
     /* Convert markup to cover jQuery behavior */
     if (
       SAFE_FOR_JQUERY &&
@@ -1037,6 +1078,18 @@ function createDOMPurify(window = getGlobal()) {
 
       /* Work around a security issue in jQuery 3.0 */
       if (SAFE_FOR_JQUERY && regExpTest(/\/>/i, value)) {
+        _removeAttribute(name, currentNode);
+        continue;
+      }
+
+      /* Work around a security issue with comments inside attributes */
+      if (
+        SAFE_FOR_XML &&
+        regExpTest(
+          /((--!?|])>)|<\/(style|script|title|xmp|textarea|noscript|iframe|noembed|noframes)/i,
+          value
+        )
+      ) {
         _removeAttribute(name, currentNode);
         continue;
       }
