@@ -149,6 +149,7 @@ function createDOMPurify(window = getGlobal()) {
 
   const ElementPrototype = Element.prototype;
   const getParentNode = lookupGetter(ElementPrototype, 'parentNode');
+  const getChildNodes = lookupGetter(ElementPrototype, 'childNodes');
 
   // As per issue #47, the web-components registry is inherited by a
   // new document created via createHTMLDocument. As per the spec
@@ -671,7 +672,15 @@ function createDOMPurify(window = getGlobal()) {
       !(elm.attributes instanceof NamedNodeMap) ||
       typeof elm.removeAttribute !== 'function' ||
       typeof elm.setAttribute !== 'function' ||
-      typeof elm.namespaceURI !== 'string'
+      typeof elm.namespaceURI !== 'string' ||
+      typeof elm.insertBefore !== 'function' ||
+      typeof elm.hasChildNodes !== 'function' ||
+      /* HTMLFormElement has [LegacyOverrideBuiltIns]: a descendant named
+         "childNodes" shadows the prototype getter. Compare the direct read
+         to the cached Node.prototype getter, the two values differ when the
+         form's named-property getter intercepts the read. This catches every
+         clobbering child type (input, select, etc.) */
+      elm.childNodes !== getChildNodes(elm)
     ) {
       return true;
     }
@@ -704,6 +713,14 @@ function createDOMPurify(window = getGlobal()) {
    * @return {Boolean} true is object is a DOM node
    */
   const _isNode = function (object) {
+    /* Trust the prototype chain first. A form can clobber nodeType and
+       nodeName through named descendants, which fails the duck-typing below
+       and would stringify an IN_PLACE root instead of sanitizing the node,
+       leaving it untouched. GHSA-r47g-fvhr-h676. */
+    if (typeof Node === 'function' && object instanceof Node) {
+      return true;
+    }
+
     return typeof Node === 'object'
       ? object instanceof Node
       : object &&
@@ -1294,7 +1311,21 @@ function createDOMPurify(window = getGlobal()) {
     }
 
     if (IN_PLACE) {
-      /* No special handling necessary for in-place sanitization */
+      /* Pre-flight the root through _isClobbered. The iterator-driven
+         removal path can not detach a parent-less root: _forceRemove
+         falls back to setting outerHTML, which is a no-op on a node with
+         no parent. A clobbered root would then survive the main loop with
+         its attributes uninspected, because the loop skips
+         _sanitizeAttributes for nodes _sanitizeElements removed. The
+         result would be an attacker-controlled element, complete with any
+         event-handler attributes the caller passed in, handed back to the
+         application unsanitized. Refuse to sanitize such a root.
+         GHSA-r47g-fvhr-h676. */
+      if (dirty instanceof Element && _isClobbered(dirty)) {
+        throw typeErrorCreate(
+          'root node is clobbered and cannot be sanitized in-place'
+        );
+      }
     } else if (dirty instanceof Node) {
       /* If dirty is a DOM element, append to an empty document to avoid
          elements being stripped by the parser */

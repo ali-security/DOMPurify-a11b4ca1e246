@@ -2400,6 +2400,270 @@ module.exports = function (DOMPurify, window, tests, xssTests) {
       });
     }
   );
+  /* GHSA-r47g-fvhr-h676: a clobbered IN_PLACE root can not be detached by
+     _forceRemove when it has no parent, and the main loop then never
+     sanitizes its attributes. sanitize() must refuse such a root. */
+  var supportsFormClobbering = function () {
+    var form = document.createElement('form');
+    var input = document.createElement('input');
+    input.setAttribute('name', 'nodeName');
+    form.appendChild(input);
+    return typeof form.nodeName !== 'string';
+  };
+  /* Clobber form[name] with a named child. Engines without form named
+     properties (e.g. jsdom) get the same shadowing simulated through an
+     own property, so the clobbering checks are exercised everywhere. */
+  var clobberForm = function (form, name, tag) {
+    var child = document.createElement(tag || 'input');
+    child.setAttribute('name', name);
+    form.appendChild(child);
+    if (form[name] !== child) {
+      Object.defineProperty(form, name, { value: child, configurable: true });
+    }
+
+    return form;
+  };
+  var createForm = function (attributes) {
+    var form = document.createElement('form');
+    Object.keys(attributes).forEach(function (attr) {
+      form.setAttribute(attr, attributes[attr]);
+    });
+    return form;
+  };
+  var inPlaceError = function (root, cfg) {
+    var config = cfg || {};
+    config.IN_PLACE = true;
+    try {
+      DOMPurify.sanitize(root, config);
+    } catch (error) {
+      return String(error && error.message);
+    }
+
+    return null;
+  };
+  QUnit.test(
+    'IN_PLACE: parent-less form root clobbered by name="nodeName" throws instead of keeping onmouseover',
+    function (assert) {
+      if (!supportsFormClobbering()) {
+        assert.ok(true, 'SKIP: no form clobbering in this engine');
+        return;
+      }
+
+      // The advisory's PoC, using real named-property clobbering
+      var root = document.createElement('form');
+      root.setAttribute('onmouseover', 'window.__rooted_h676 = 1');
+      var clobber = document.createElement('input');
+      clobber.setAttribute('name', 'nodeName');
+      root.appendChild(clobber);
+      var message = inPlaceError(root);
+      assert.ok(
+        /clobbered/.test(message || ''),
+        'clobbered parent-less IN_PLACE root must throw, got: ' +
+          message +
+          ', onmouseover kept: ' +
+          root.hasAttribute('onmouseover')
+      );
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: every clobbering name from GHSA-r47g-fvhr-h676 makes the form root throw',
+    function (assert) {
+      var clobberNames = [
+        'nodeName',
+        'setAttribute',
+        'namespaceURI',
+        'insertBefore',
+        'hasChildNodes',
+        'childNodes',
+        'attributes',
+        'textContent',
+        'removeChild',
+        'removeAttribute',
+      ];
+      clobberNames.forEach(function (name) {
+        var root = clobberForm(
+          createForm({ onmouseover: 'window.__rooted_' + name + ' = 1' }),
+          name
+        );
+        var message = inPlaceError(root);
+        assert.ok(
+          /clobbered/.test(message || ''),
+          'IN_PLACE root clobbered by name="' +
+            name +
+            '" must throw, got: ' +
+            message
+        );
+      });
+      var root = clobberForm(
+        createForm({ onmouseover: 'window.__rooted_select = 1' }),
+        'childNodes',
+        'select'
+      );
+      var message = inPlaceError(root);
+      assert.ok(
+        /clobbered/.test(message || ''),
+        'IN_PLACE root clobbered by <select name="childNodes"> must throw, got: ' +
+          message
+      );
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: clobbered form root with javascript: action, clobbering id or template expressions throws',
+    function (assert) {
+      var cases = [
+        ['action', { action: 'javascript:alert(1)' }, {}],
+        ['formaction', { formaction: 'javascript:alert(1)' }, {}],
+        ['id', { id: 'cookie' }, {}],
+        [
+          'SAFE_FOR_TEMPLATES',
+          { title: "{{constructor.constructor('alert(1)')()}}" },
+          { SAFE_FOR_TEMPLATES: true },
+        ],
+      ];
+      cases.forEach(function (testCase) {
+        var root = clobberForm(createForm(testCase[1]), 'nodeName');
+        var message = inPlaceError(root, testCase[2]);
+        assert.ok(
+          /clobbered/.test(message || ''),
+          testCase[0] + ': clobbered IN_PLACE root must throw, got: ' + message
+        );
+        // The named-property mapping is sticky, a second call must throw too
+        message = inPlaceError(root, testCase[2]);
+        assert.ok(
+          /clobbered/.test(message || ''),
+          testCase[0] + ': second sanitize() call must throw, got: ' + message
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: clobbered form root is rejected even when it has a parent',
+    function (assert) {
+      var wrapper = document.createElement('div');
+      var root = clobberForm(
+        createForm({ onmouseover: 'window.__rooted_parented = 1' }),
+        'nodeName'
+      );
+      wrapper.appendChild(root);
+      var message = inPlaceError(root);
+      assert.ok(
+        /clobbered/.test(message || ''),
+        'clobbered IN_PLACE root with a parent must throw, got: ' + message
+      );
+      assert.equal(
+        wrapper.querySelectorAll('form').length,
+        1,
+        'the root is left untouched when sanitize() throws'
+      );
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: form root clobbering nodeType is sanitized in place instead of being stringified',
+    function (assert) {
+      // A clobbered nodeType used to fail the node check, so the root was
+      // stringified and the caller's node was never sanitized at all
+      var root = clobberForm(
+        createForm({
+          onmouseover: 'window.__rooted_nodetype = 1',
+          action: 'javascript:alert(1)',
+        }),
+        'nodeType'
+      );
+      var clean = DOMPurify.sanitize(root, { IN_PLACE: true });
+      assert.strictEqual(clean, root, 'the root node itself is returned');
+      assert.equal(
+        root.hasAttribute('onmouseover'),
+        false,
+        'onmouseover is removed from the root'
+      );
+      assert.equal(
+        root.hasAttribute('action'),
+        false,
+        'javascript: action is removed from the root'
+      );
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: polluted Object.prototype.__depth makes the root throw instead of returning it unsanitized',
+    function (assert) {
+      var pollutions = [
+        ['__depth', 'x'],
+        ['__removalCount', 'x'],
+      ];
+      pollutions.forEach(function (pollution) {
+        var root = document.createElement('a');
+        root.setAttribute('href', 'javascript:alert(1)');
+        root.setAttribute('onmouseover', 'window.__rooted_polluted = 1');
+        var message;
+        Object.prototype[pollution[0]] = pollution[1];
+        try {
+          message = inPlaceError(root);
+        } finally {
+          delete Object.prototype[pollution[0]];
+        }
+
+        assert.ok(
+          /clobbered/.test(message || ''),
+          'Object.prototype.' +
+            pollution[0] +
+            ': IN_PLACE root must throw, got: ' +
+            message +
+            ', onmouseover kept: ' +
+            root.hasAttribute('onmouseover')
+        );
+      });
+    }
+  );
+  QUnit.test(
+    'IN_PLACE: clobbered forms below the root are removed, unclobbered roots are still sanitized',
+    function (assert) {
+      // A clobbered form with a parent is removed by the main loop
+      var wrapper = document.createElement('div');
+      wrapper.appendChild(
+        clobberForm(
+          createForm({ onmouseover: 'window.__rooted_nested = 1' }),
+          'childNodes',
+          'select'
+        )
+      );
+      wrapper.appendChild(
+        clobberForm(
+          createForm({ onmouseover: 'window.__rooted_nested = 2' }),
+          'nodeName'
+        )
+      );
+      assert.equal(inPlaceError(wrapper), null, 'wrapper root does not throw');
+      assert.equal(
+        wrapper.querySelectorAll('form').length,
+        0,
+        'clobbered forms below the root are removed: ' + wrapper.innerHTML
+      );
+      // A document fragment root is not an element and does not throw
+      var fragment = document.createDocumentFragment();
+      fragment.appendChild(
+        clobberForm(
+          createForm({ onmouseover: 'window.__rooted_fragment = 1' }),
+          'nodeName'
+        )
+      );
+      assert.equal(inPlaceError(fragment), null, 'fragment root does not throw');
+      assert.equal(
+        fragment.firstChild,
+        null,
+        'clobbered form inside a fragment root is removed'
+      );
+      // An unclobbered form root is sanitized as before
+      var plain = createForm({
+        onmouseover: 'window.__rooted_plain = 1',
+        action: 'javascript:alert(1)',
+      });
+      plain.appendChild(document.createElement('input'));
+      assert.equal(inPlaceError(plain), null, 'unclobbered root does not throw');
+      assert.equal(plain.hasAttribute('onmouseover'), false, 'onmouseover removed');
+      assert.equal(plain.hasAttribute('action'), false, 'javascript: action removed');
+      assert.equal(plain.querySelectorAll('input').length, 1, 'input is kept');
+    }
+  );
   QUnit.test(
     'Test protection from prototype pollution of documentMode',
     function (assert) {
