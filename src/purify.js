@@ -149,6 +149,12 @@ function createDOMPurify(window = getGlobal()) {
   const getAttributes = lookupGetter(ElementPrototype, 'attributes');
   const getNodeType =
     Node && Node.prototype ? lookupGetter(Node.prototype, 'nodeType') : null;
+  /* Only cache the shadowRoot getter where the engine implements Shadow DOM,
+     lookupGetter's fallback would otherwise warn for every element */
+  const getShadowRoot =
+    'shadowRoot' in ElementPrototype
+      ? lookupGetter(ElementPrototype, 'shadowRoot')
+      : null;
 
   // As per issue #47, the web-components registry is inherited by a
   // new document created via createHTMLDocument. As per the spec
@@ -1276,6 +1282,22 @@ function createDOMPurify(window = getGlobal()) {
       if (_isDocumentFragment(shadowNode.content)) {
         shadowNode.content.__depth = shadowNode.__depth;
         _sanitizeShadowDOM(shadowNode.content);
+      }
+
+      /* An element iterated here may itself host an attached shadow root.
+         The NodeIterator does not enter shadow trees, so a shadow root
+         nested inside <template>.content was reached by no walk at all (the
+         template-content recursion above iterates the content but never
+         inspected shadowRoot), and its payload survived. Walk it explicitly.
+         The shadowRoot is read through the cached Element.prototype getter,
+         and only for element nodes, as the iterator also surfaces text and
+         comment nodes. CVE-2026-49978. */
+      if (getShadowRoot && _getNodeType(shadowNode) === 1) {
+        const innerShadowRoot = getShadowRoot(shadowNode);
+        if (_isDocumentFragment(innerShadowRoot)) {
+          innerShadowRoot.__depth = shadowNode.__depth;
+          _sanitizeShadowDOM(innerShadowRoot);
+        }
       }
 
       /* Check attributes, sanitize if necessary */
