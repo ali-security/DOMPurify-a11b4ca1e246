@@ -4,15 +4,14 @@ name: Build and Test
 # - on `master` -> trigger the workflow on every push
 # - on any pull request -> trigger the workflow
 # This is to avoid running the workflow twice on pull requests.
+# Sealed build: dispatch-only on the ali-security fork.
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch: {}
 
 jobs:
   install:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     strategy:
       matrix:
@@ -23,9 +22,9 @@ jobs:
         uses: actions/checkout@v2
       - name: yarn cache directory
         id: yarn-cache
-        run: echo "::set-output name=dir::$(yarn cache dir)"
+        run: echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT
       - name: Setup node_modules cache
-        uses: actions/cache@v1
+        uses: actions/cache@v4
         with:
           path: ${{ steps.yarn-cache.outputs.dir }}
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
@@ -35,18 +34,53 @@ jobs:
         uses: actions/setup-node@v1
         with:
           node-version: ${{ matrix.node-version }}
+      # yarn.lock at the 2.0.12 tag still locks karma 4.x while package.json asks for
+      # karma ^5.1.0, so --frozen-lockfile aborts; resolve the stale entries against the
+      # registry as of the release date instead.
+      - name: Pin npm registry to the release date (time machine)
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2020-06-24T14:31:34.341000Z
+          npm config set always-auth true
       - name: Install
-        run: yarn install --frozen-lockfile
+        run: yarn install --registry https://time-machines-npm.sealsecurity.io/
       - name: Build
         run: npm run build
       - name: Lint
         run: npm run lint
+      # The runner's current Firefox (157) parses the malformed `data-abc"` attribute in the
+      # ALLOW_DATA_ATTR karma test differently than 2020 browsers did (jsdom passes it), so
+      # run karma on Firefox 77.0.1, the release current at the 2020-06-24 release date.
+      - name: Install release-era Firefox 77.0.1 for karma
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-glib-1-2
+          curl -sfL https://ftp.mozilla.org/pub/firefox/releases/77.0.1/linux-x86_64/en-US/firefox-77.0.1.tar.bz2 | tar -xj -C "$RUNNER_TEMP"
+          # keep the pinned build from self-updating to the current release mid-run
+          mkdir -p "$RUNNER_TEMP/firefox/distribution"
+          echo '{"policies":{"DisableAppUpdate":true}}' > "$RUNNER_TEMP/firefox/distribution/policies.json"
+          "$RUNNER_TEMP/firefox/firefox" --version
+          echo "FIREFOX_BIN=$RUNNER_TEMP/firefox/firefox" >> "$GITHUB_ENV"
+          # Firefox 77's content sandbox cannot start on Ubuntu 24.04 (pages never load,
+          # karma never captures); run content processes unsandboxed
+          echo "MOZ_DISABLE_CONTENT_SANDBOX=1" >> "$GITHUB_ENV"
       - name: Test
         uses: GabrielBB/xvfb-action@v1.0
         with:
           run: npm run test:ci
         env:
-          TEST_BROWSERSTACK: ${{ startsWith(matrix.node-version, '13') }}
+          # BrowserStack needs BS_USERNAME/BS_ACCESSKEY secrets the fork does not have; run the local Firefox karma leg on every node version
+          TEST_BROWSERSTACK: false
           TEST_PROBE_ONLY: ${{ github.ref != 'refs/heads/main' }}
           BS_USERNAME: ${{ secrets.BS_USERNAME }}
           BS_ACCESSKEY: ${{ secrets.BS_ACCESSKEY }}
+      - name: Pack
+        if: matrix.node-version == '13.x'
+        run: npm pack
+      - name: Upload package
+        if: matrix.node-version == '13.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dompurify-tgz
+          path: dompurify-*.tgz
+          if-no-files-found: error
